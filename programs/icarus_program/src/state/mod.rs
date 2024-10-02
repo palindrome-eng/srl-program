@@ -1,8 +1,9 @@
 mod lending_market;
 mod reserve;
+mod obligation;
 mod last_update;
 
-pub use {lending_market::*, reserve::*, last_update::*};
+pub use {lending_market::*, reserve::*, last_update::*, obligation::*};
 
 /// Collateral tokens are initially valued at a ratio of 5:1
 /// (collateral:liquidity)
@@ -25,6 +26,24 @@ pub const WAD: u64 = 1_000_000_000_000_000_000;
 pub const HALF_WAD: u64 = 500_000_000_000_000_000;
 /// Scale for percentages
 pub const PERCENT_SCALER: u64 = 10_000_000_000_000_000;
+/// Scale for Basis Points
+pub const BASIS_POINT_SCALER: u64 = 100_000_000_000_000;
+
+/// Minimum Fee for same Epoch Borrowing in BPS
+pub const MINIMUM_FEE: u64 = 100; // move to the pool config
+
+/// Fee for Late Repayment in %
+pub const LATE_FEE: u64 = 1; // move to the pool config
+
+/// Max TVL Ratio for Short, Medium and Long Term Loans
+pub const SHORT_MAX_RATIO: u64 = 90;
+pub const MEDIUM_MAX_RATIO: u64 = 80;
+pub const LONG_MAX_RATIO: u64 = 70;
+
+/// Duraction for Short, Medium and Long Term Loans
+pub const SHORT_LOAN_DURATION: u64 = 15;
+pub const MEDIUM_LOAN_DURATION: u64 = 45;
+pub const LONG_LOAN_DURATION: u64 = 90;
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FixedPrecision(pub u128);

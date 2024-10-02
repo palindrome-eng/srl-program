@@ -1,27 +1,41 @@
 pub use {
     super::*,
-    crate::error::LendingError,
     anchor_lang::prelude::*,
     solana_program::{clock::{Epoch, Slot}, native_token::LAMPORTS_PER_SOL},
+    crate::error::LendingError,
 };
+
+/// How does `Reserve` work for Icarus:
+/// 
+/// todo!()
 
 #[account]
 #[derive(Default)]
 pub struct Reserve {
     /// Version of the struct
     pub version: u8,
-    /// Last Epoch when updated
-    pub last_epoch: Epoch,
-    /// Last slot when supply and rates updated
-    pub last_update: LastUpdate,
     /// Lending market address
     pub lending_market: Pubkey,
+    /// Vote account address
+    pub vote_account: Pubkey,
+    /// Last updated epoch
+    pub last_epoch: Epoch,
+    /// Last slot where supply and rates got updated
+    pub last_update: LastUpdate,
     /// Reserve liquidity
     pub liquidity: ReserveLiquidity,
+    /// Reserve Collateral
+    pub collateral: ReserveCollateral,
+    /// Bump seed for Reserve
+    pub bump: u8,
+    /// Bump seed for the Stake Account
+    pub stake_bump: u8,
+    /// Bump seed for the Vault Account
+    pub vault_bump: u8,
 }
 
 impl Space for Reserve {
-    const INIT_SPACE: usize = 8 + 1 + LastUpdate::INIT_SPACE + 32 + ReserveLiquidity::INIT_SPACE + 128;
+    const INIT_SPACE: usize = 8 + 1 + 32 + 32 + 8 + LastUpdate::INIT_SPACE + ReserveLiquidity::INIT_SPACE + ReserveCollateral::INIT_SPACE + 1 + 1 + 1 + 128;
 }
 
 impl Reserve {
@@ -38,30 +52,22 @@ impl Reserve {
         self.last_epoch = params.current_epoch;
         self.last_update = LastUpdate::new(params.current_slot);
         self.lending_market = params.lending_market;
+        self.vote_account = params.vote_account;
         self.liquidity = params.liquidity;
-    }
-
-    /// Return epoch elapsed since given epoch
-    pub fn epoch_elapsed(&self, epoch: Epoch) -> Result<u64> {
-        let epoch_elapsed = epoch
-            .checked_sub(self.last_epoch)
-            .ok_or(LendingError::MathOverflow)?;
-        Ok(epoch_elapsed)
-    }
-
-    /// Set last update epoch
-    pub fn update_epoch(&mut self, epoch: Epoch) {
-        self.last_epoch = epoch;
+        self.collateral = params.collateral;
+        self.bump = params.bump;
+        self.stake_bump = params.stake_bump;
+        self.vault_bump = params.vault_bump;
     }
 
     /// Record deposited liquidity and return amount of collateral tokens to mint
     pub fn deposit(&mut self, liquidity_amount: u64) -> Result<u64> {
-        let token_amount = self
-            .calculate_token_position(
-                liquidity_amount,
-                self.liquidity.total_liquidity()?,
-                self.liquidity.mint_total_supply,
-            )?;
+        let total_liquidity = self.liquidity.total_liquidity()?;
+        let token_amount = self.calculate_token_position(
+            liquidity_amount,
+            total_liquidity,
+            self.liquidity.mint_total_supply,
+        )?;
 
         self.liquidity.deposit(liquidity_amount)?;
         self.liquidity.mint(token_amount)?;
@@ -69,16 +75,49 @@ impl Reserve {
         Ok(token_amount)
     }
 
+
+    /// Record reedeemed liquidity and return amount of collateral to withdraw
     pub fn reedem(&mut self, token_amount: u64) -> Result<u64> {
-        let liquidity_amount = self
-            .calculate_liquidity_position(
-                token_amount,
-                self.liquidity.total_liquidity()?,
-                self.liquidity.mint_total_supply,
-            )?;
+        let total_liquidity = self.liquidity.total_liquidity()?;
+        let liquidity_amount = self.calculate_liquidity_position(
+            token_amount,
+            total_liquidity,
+            self.liquidity.mint_total_supply,
+        )?;
 
         self.liquidity.withdraw(liquidity_amount)?;
         self.liquidity.burn(token_amount)?;
+
+        Ok(liquidity_amount)
+    }
+
+    /// Record deposited collateral and return amount of collateral tokens to mint
+    pub fn deposit_collateral(&mut self, collateral_amount: u64) -> Result<u64> {
+        let total_collateral = self.collateral.collateral_amount;
+        let token_amount = self.calculate_token_position(
+            collateral_amount,
+            total_collateral,
+            self.collateral.mint_total_supply,
+        )?;
+
+        self.collateral.deposit(collateral_amount)?;
+        self.collateral.mint(token_amount)?;
+
+        Ok(token_amount)
+    }
+
+
+    /// Record reedeemed liquidity and return amount of collateral to withdraw
+    pub fn reedem_collateral(&mut self, token_amount: u64) -> Result<u64> {
+        let total_collateral = self.collateral.collateral_amount;
+        let liquidity_amount = self.calculate_liquidity_position(
+            token_amount,
+            total_collateral,
+            self.collateral.mint_total_supply,
+        )?;
+
+        self.collateral.withdraw(liquidity_amount)?;
+        self.collateral.burn(token_amount)?;
 
         Ok(liquidity_amount)
     }
@@ -87,40 +126,49 @@ impl Reserve {
     pub fn calculate_token_position(
         &self,
         liquidity_deposit: u64,
-        total_liquidity: u128,
+        total_liquidity: u64,
         total_token_supply: u64,
     ) -> Result<u64> {
         if total_liquidity == 0 || total_token_supply == 0 {
             return Ok(liquidity_deposit);
-        } else {
-            Ok(u64::try_from(
-                (liquidity_deposit as u128)
-                    .checked_mul(total_token_supply as u128)
-                    .ok_or(LendingError::MathOverflow)?
-                    .checked_div(total_liquidity)
-                    .ok_or(LendingError::MathOverflow)?,
-            ).map_err(|_| LendingError::MathOverflow)?)
         }
+
+        let numerator = (liquidity_deposit as u128).checked_mul(total_token_supply as u128)
+            .ok_or(LendingError::MathOverflow)?;
+        let result = numerator.checked_div(total_liquidity as u128)
+            .ok_or(LendingError::MathOverflow)?;
+
+        u64::try_from(result).map_err(|_| LendingError::MathOverflow.into())
     }
 
     /// Calculate liquidity to withdraw, given total token supply, total liquidity, pool tokens to burn
     pub fn calculate_liquidity_position(
         &self,
         token_to_burn: u64,
-        total_liquidity: u128,
+        total_liquidity: u64,
         total_token_supply: u64,
     ) -> Result<u64> {
         if total_liquidity == 0 || total_token_supply == 0 {
             return Ok(0);
-        } else {
-            Ok(u64::try_from(
-                (token_to_burn as u128)
-                    .checked_mul(total_liquidity)
-                    .ok_or(LendingError::MathOverflow)?
-                    .checked_div(total_token_supply as u128)
-                    .ok_or(LendingError::MathOverflow)?,
-            ).map_err(|_| LendingError::MathOverflow)?)
         }
+
+        let numerator = (token_to_burn as u128).checked_mul(total_liquidity as u128)
+            .ok_or(LendingError::MathOverflow)?;
+        let result = numerator.checked_div(total_token_supply as u128)
+            .ok_or(LendingError::MathOverflow)?;
+
+        u64::try_from(result).map_err(|_| LendingError::MathOverflow.into())
+    }
+
+    /// Return epoch elapsed since given epoch
+    pub fn epoch_elapsed(&self, epoch: Epoch) -> Result<u64> {
+        epoch.checked_sub(self.last_epoch)
+            .ok_or(LendingError::MathOverflow.into())
+    }
+
+    /// Set last update epoch
+    pub fn update_epoch(&mut self, epoch: Epoch) {
+        self.last_epoch = epoch;
     }
 
     // pub fn current_borrow_rate -- To be implemented
@@ -143,8 +191,18 @@ pub struct InitReserveParams {
     pub current_slot: Slot,
     /// Lending market address
     pub lending_market: Pubkey,
+    /// Vote account address
+    pub vote_account: Pubkey,
     /// Reserve liquidity
     pub liquidity: ReserveLiquidity,
+    /// Reserve Collateral
+    pub collateral: ReserveCollateral,
+    /// Bump seed for Reserve
+    pub bump: u8,
+    /// Bump seed for the Stake Account
+    pub stake_bump: u8,
+    /// Bump seed for the Vault Account
+    pub vault_bump: u8,
 }
 
 /// Reserve liquidity
@@ -154,7 +212,7 @@ pub struct ReserveLiquidity {
     pub mint_total_supply: u64,
     pub vault_pubkey: Pubkey,
     pub available_amount: u64,
-    pub borrowed_amount_wads: u128,
+    pub borrowed_amount: u64,
     pub cumulative_borrow_rate_wads: u128,
 }
 
@@ -165,69 +223,82 @@ impl ReserveLiquidity {
             mint_total_supply: 0,
             vault_pubkey: params.vault_pubkey,
             available_amount: 0,
-            borrowed_amount_wads: 0,
+            borrowed_amount: 0,
             cumulative_borrow_rate_wads: WAD as u128,
         }
     }
 
-    pub fn total_liquidity(&self) -> Result<u128> {
-        (self.available_amount as u128)
-            .checked_add(self.borrowed_amount_wads)
+    /// Calculate total liquidity in the reserve
+    pub fn total_liquidity(&self) -> Result<u64> {
+        self.available_amount
+            .checked_add(self.borrowed_amount)
             .ok_or_else(|| error!(LendingError::MathOverflow))
     }
 
+    /// Add minted tokens to the total supply
     pub fn mint(&mut self, mint_amount: u64) -> Result<()> {
         self.mint_total_supply = self.mint_total_supply
             .checked_add(mint_amount)
-            .ok_or_else(|| error!(LendingError::MathOverflow))?;
+            .ok_or(LendingError::MathOverflow)?;
         Ok(())
     }
 
+    /// Substract burned tokens from the total supply
     pub fn burn(&mut self, burn_amount: u64) -> Result<()> {
         self.mint_total_supply = self.mint_total_supply
             .checked_sub(burn_amount)
-            .ok_or_else(|| error!(LendingError::MathOverflow))?;
+            .ok_or(LendingError::MathOverflow)?;
         Ok(())
     }
 
+    /// Deposit liquidity into the reserve
     pub fn deposit(&mut self, liquidity_amount: u64) -> Result<()> {
         self.available_amount = self.available_amount
             .checked_add(liquidity_amount)
-            .ok_or_else(|| error!(LendingError::MathOverflow))?;
+            .ok_or(LendingError::MathOverflow)?;
         Ok(())
     }
 
+    /// Withdraw liquidity from the reserve
     pub fn withdraw(&mut self, liquidity_amount: u64) -> Result<()> {
         if liquidity_amount > self.available_amount {
             return Err(error!(LendingError::InsufficientLiquidity));
         }
         self.available_amount = self.available_amount
             .checked_sub(liquidity_amount)
-            .ok_or_else(|| error!(LendingError::MathOverflow))?;
+            .ok_or(LendingError::MathOverflow)?;
         Ok(())
     }
 
+    /// Borrow liquidity from the reserve
     pub fn borrow(&mut self, borrow_amount: u64) -> Result<()> {
         if borrow_amount > self.available_amount {
             return Err(error!(LendingError::InsufficientLiquidity));
         }
         self.available_amount = self.available_amount
             .checked_sub(borrow_amount)
-            .ok_or_else(|| error!(LendingError::MathOverflow))?;
-        self.borrowed_amount_wads = self.borrowed_amount_wads
-            .checked_add((borrow_amount as u128).checked_mul(WAD as u128)
-                .ok_or_else(|| error!(LendingError::MathOverflow))?)
-            .ok_or_else(|| error!(LendingError::MathOverflow))?;
+            .ok_or(LendingError::MathOverflow)?;
+        self.borrowed_amount = self.borrowed_amount
+            .checked_add(borrow_amount)
+            .ok_or(LendingError::MathOverflow)?;
         Ok(())
     }
 
-    pub fn repay(&mut self, repay_amount: u64, settle_amount_wads: u128) -> Result<()> {
+    /// Repay borrowed liquidity to the reserve
+    pub fn repay(&mut self, repay_amount: u64, settle_amount: u64) -> Result<()> {
         self.available_amount = self.available_amount
             .checked_add(repay_amount)
-            .ok_or_else(|| error!(LendingError::MathOverflow))?;
-        self.borrowed_amount_wads = self.borrowed_amount_wads
-            .checked_sub(settle_amount_wads)
-            .ok_or_else(|| error!(LendingError::MathOverflow))?;
+            .ok_or(LendingError::MathOverflow)?;
+        self.borrowed_amount = self.borrowed_amount
+            .checked_sub(settle_amount)
+            .ok_or(LendingError::MathOverflow)?;
+        Ok(())
+    }
+
+    pub fn liquidate(&mut self, liquidate_amount: u64) -> Result<()> {
+        self.borrowed_amount = self.borrowed_amount
+            .checked_sub(liquidate_amount)
+            .ok_or(LendingError::MathOverflow)?;
         Ok(())
     }
 
@@ -245,44 +316,78 @@ pub struct NewReserveLiquidityParams {
     pub vault_pubkey: Pubkey,
 }
 
-// /// Reserve mints
-// #[derive(AnchorSerialize, AnchorDeserialize, Clone, Default)]
-// pub struct ReserveMints {
-//     pub liquidity_mint_pubkey: Pubkey,
-//     pub liquidity_supply: u64,
-//     pub collateral_mint_pubkey: Pubkey,
-//     pub collateral_supply: u64,
-// }
+/// Reserve Collateral
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Default, InitSpace)]
+pub struct ReserveCollateral {
+    pub mint_pubkey: Pubkey,
+    pub mint_total_supply: u64,
+    pub stake_account: Pubkey,
+    pub collateral_amount: u64,
+    pub collateral_amount_to_claim: u64
+}
 
-// impl ReserveMints {
-//     pub fn mint_liquidity(&mut self, amount: u64) -> Result<()> {
-//         self.liquidity_supply = self.liquidity_supply
-//             .checked_add(amount)
-//             .ok_or_else(|| error!(LendingError::MathOverflow))?;
-//         Ok(())
-//     }
+impl ReserveCollateral {
+    pub fn new(params: NewReserveCollateralParams) -> Self {
+        Self {
+            mint_pubkey: params.mint_pubkey,
+            mint_total_supply: 0,
+            stake_account: params.stake_account,
+            collateral_amount: 0,
+            collateral_amount_to_claim: 0,
+        }
+    }
 
-//     pub fn burn_liquidity(&mut self, amount: u64) -> Result<()> {
-//         self.liquidity_supply = self.liquidity_supply
-//             .checked_sub(amount)
-//             .ok_or_else(|| error!(LendingError::MathOverflow))?;
-//         Ok(())
-//     }
+    pub fn mint(&mut self, mint_amount: u64) -> Result<()> {
+        Ok(self.mint_total_supply = self.mint_total_supply
+            .checked_add(mint_amount)
+            .ok_or(LendingError::MathOverflow)?)
+    }
 
-//     pub fn mint_collateral(&mut self, amount: u64) -> Result<()> {
-//         self.collateral_supply = self.collateral_supply
-//             .checked_add(amount)
-//             .ok_or_else(|| error!(LendingError::MathOverflow))?;
-//         Ok(())
-//     }
+    pub fn burn(&mut self, burn_amount: u64) -> Result<()> {
+        Ok(self.mint_total_supply = self.mint_total_supply
+            .checked_sub(burn_amount)
+            .ok_or(LendingError::MathOverflow)?
+        )
+    }
 
-//     pub fn burn_collateral(&mut self, amount: u64) -> Result<()> {
-//         self.collateral_supply = self.collateral_supply
-//             .checked_sub(amount)
-//             .ok_or_else(|| error!(LendingError::MathOverflow))?;
-//         Ok(())
-//     }
-// }
+    pub fn claim_interest(&mut self, interest_amount: u64) -> Result<()> {
+        Ok(self.collateral_amount_to_claim = self.collateral_amount_to_claim
+            .checked_add(interest_amount)
+            .ok_or(LendingError::MathOverflow)?
+        )
+    }
+
+    pub fn repay_or_liquidate(&mut self, amount: u64, interest_amount: u64, weighted_amount: u64,) -> Result<()> {
+        self.withdraw(amount)?;
+        self.claim_interest(interest_amount)?;
+        self.burn(weighted_amount)?;
+
+        Ok(())
+    }
+
+    pub fn deposit(&mut self, collateral_amount: u64) -> Result<()> {
+        self.collateral_amount = self.collateral_amount
+            .checked_add(collateral_amount)
+            .ok_or(LendingError::MathOverflow)?;
+
+        Ok(())
+    }
+
+    pub fn withdraw(&mut self, collateral_amount: u64) -> Result<()> {        
+        require_gte!(collateral_amount, self.collateral_amount, LendingError::InsufficientLiquidity);
+        Ok(self.collateral_amount = self.collateral_amount
+            .checked_sub(collateral_amount)
+            .ok_or(LendingError::MathOverflow)?
+        )
+    }
+}
+
+/// New reserve collateral parameters
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct NewReserveCollateralParams {
+    pub mint_pubkey: Pubkey,
+    pub stake_account: Pubkey,
+}
 
 // // ToDo: Run Calculation for ReserveConfig
 // #[derive(AnchorSerialize, AnchorDeserialize, Clone, Default)]

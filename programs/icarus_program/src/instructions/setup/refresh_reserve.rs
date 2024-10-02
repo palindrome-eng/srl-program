@@ -6,10 +6,10 @@ pub use {
 #[derive(Accounts)]
 pub struct RefreshReserve<'info> {
     #[account(mut)]
-    pub admin: Signer<'info>,
+    pub cranker: Signer<'info>,
     #[account(
         mut,
-        seeds = [RESERVE_PREFIX, reserve.lending_market.key().as_ref()],
+        seeds = [RESERVE_PREFIX, reserve.lending_market.as_ref(), reserve.vote_account.as_ref()],
         bump,
     )]
     pub reserve: Account<'info, Reserve>,

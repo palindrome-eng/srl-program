@@ -1,8 +1,8 @@
 use {
-    crate::error::LendingError,
     anchor_lang::prelude::*,
-    solana_program::clock::{Slot, Epoch},
+    solana_program::clock::Slot,
     std::cmp::Ordering,
+    crate::error::LendingError,
 };
 
 /// Number of epochs to consider stale after

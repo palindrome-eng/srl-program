@@ -1,7 +1,7 @@
 pub use {
     anchor_lang::prelude::*,
     solana_program::{system_instruction, program::invoke_signed},
-    crate::{state::{LendingMarket, Reserve}, error::LendingError, LENDING_MARKET_PREFIX, LENDING_MARKET_AUTHORITY_PREFIX, RESERVE_PREFIX, LIQUIDITY_VAULT_PREFIX },
+    crate::{state::{LendingMarket, Reserve}, error::LendingError, LENDING_MARKET_AUTHORITY_PREFIX, RESERVE_PREFIX, LIQUIDITY_VAULT_PREFIX },
     anchor_spl::token::{Token, TokenAccount, burn, Burn},
 };
 
@@ -14,31 +14,22 @@ pub struct RedeemLiquidityArgs {
 pub struct RedeemLiquidity<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
-    
-    #[account(
-        mut,
-        seeds = [LENDING_MARKET_PREFIX, lending_market.vote_account.as_ref()],
-        bump = lending_market.bump_seed,
-    )]
     pub lending_market: Account<'info, LendingMarket>,
     #[account(
         mut,
-        seeds = [RESERVE_PREFIX, lending_market.key().as_ref()],
-        bump,
+        has_one = lending_market,
+        seeds = [RESERVE_PREFIX, lending_market.key().as_ref(), reserve.vote_account.as_ref()],
+        bump = reserve.bump,
     )]
     pub reserve: Account<'info, Reserve>,
     #[account(
         seeds = [LENDING_MARKET_AUTHORITY_PREFIX, lending_market.key().as_ref()],
-        bump,
+        bump = lending_market.authority_bump,
     )]
     pub lending_market_authority: UncheckedAccount<'info>,
     #[account(mut, address = reserve.liquidity.mint_pubkey)]
     pub liquidity_mint: UncheckedAccount<'info>,
-    #[account(
-        mut, 
-        seeds = [LIQUIDITY_VAULT_PREFIX, lending_market.key().as_ref()],
-        bump,
-    )]
+    #[account(mut, address = reserve.liquidity.vault_pubkey)]
     pub liquidity_vault: SystemAccount<'info>,
     #[account(
         mut,
@@ -46,15 +37,14 @@ pub struct RedeemLiquidity<'info> {
         token::authority = user,
     )]
     pub user_liquidity_token: Account<'info, TokenAccount>,
-
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>
 }
 
 impl <'info> RedeemLiquidity<'info> {
-    pub fn reedem_liquidity(&self, amount: u64, bump_seed: u8) -> Result<()> {
-        let lending_market_key = self.lending_market.key();
-        let authority_seeds = &[LIQUIDITY_VAULT_PREFIX, lending_market_key.as_ref(), &[bump_seed]];
+    pub fn reedem_liquidity(&self, amount: u64) -> Result<()> {
+        let reserve_key = self.reserve.key();
+        let authority_seeds = &[LIQUIDITY_VAULT_PREFIX, reserve_key.as_ref(), &[self.reserve.vault_bump]];
         let signers = &[&authority_seeds[..]]; 
 
         invoke_signed(
@@ -90,7 +80,7 @@ pub fn handler<'info>(ctx: Context<RedeemLiquidity>, args: RedeemLiquidityArgs) 
 
     // Deposit
     let liquidity_amount = ctx.accounts.reserve.reedem(args.token_amount)?;
-    ctx.accounts.reedem_liquidity(liquidity_amount, ctx.bumps.liquidity_vault)?;
+    ctx.accounts.reedem_liquidity(liquidity_amount)?;
 
     // Mark Reserve as Stale to force refresh
     ctx.accounts.reserve.last_update.mark_stale();

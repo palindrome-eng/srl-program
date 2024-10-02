@@ -1,7 +1,7 @@
 pub use {
     anchor_lang::prelude::*,
     solana_program::{system_instruction, program::invoke},
-    crate::{state::{LendingMarket, Reserve}, error::LendingError, LENDING_MARKET_PREFIX, LENDING_MARKET_AUTHORITY_PREFIX, RESERVE_PREFIX },
+    crate::{state::{LendingMarket, Reserve}, error::LendingError, LENDING_MARKET_AUTHORITY_PREFIX, RESERVE_PREFIX },
     anchor_spl::token::{Token, TokenAccount, mint_to, MintTo},
 };
 
@@ -14,22 +14,17 @@ pub struct DepositLiquidityArgs {
 pub struct DepositLiquidity<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
-    
-    #[account(
-        mut,
-        seeds = [LENDING_MARKET_PREFIX, lending_market.vote_account.as_ref()],
-        bump = lending_market.bump_seed,
-    )]
     pub lending_market: Account<'info, LendingMarket>,
     #[account(
         mut,
-        seeds = [RESERVE_PREFIX, lending_market.key().as_ref()],
-        bump,
+        has_one = lending_market,
+        seeds = [RESERVE_PREFIX, lending_market.key().as_ref(), reserve.vote_account.as_ref()],
+        bump = reserve.bump,
     )]
     pub reserve: Account<'info, Reserve>,
     #[account(
         seeds = [LENDING_MARKET_AUTHORITY_PREFIX, lending_market.key().as_ref()],
-        bump,
+        bump = lending_market.authority_bump,
     )]
     pub lending_market_authority: UncheckedAccount<'info>,
     #[account(mut, address = reserve.liquidity.mint_pubkey)]
@@ -42,8 +37,7 @@ pub struct DepositLiquidity<'info> {
         token::mint = liquidity_mint,
         token::authority = user,
     )]
-    pub user_liquidity_token: Account<'info, TokenAccount>,
-
+    pub user_liquidity_mint_token: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>
 }
@@ -58,9 +52,9 @@ impl <'info> DepositLiquidity<'info> {
         Ok(())
     }
 
-    pub fn mint_pool_tokens(&self, amount: u64, bump_seed: u8) -> Result<()> {
+    pub fn mint_pool_tokens(&self, amount: u64) -> Result<()> {
         let lending_market_key = self.lending_market.key();
-        let authority_seeds = &[LENDING_MARKET_AUTHORITY_PREFIX, lending_market_key.as_ref(), &[bump_seed]];
+        let authority_seeds = &[LENDING_MARKET_AUTHORITY_PREFIX, lending_market_key.as_ref(), &[self.lending_market.authority_bump]];
         let signers = &[&authority_seeds[..]];
 
         mint_to( 
@@ -68,7 +62,7 @@ impl <'info> DepositLiquidity<'info> {
                 self.token_program.to_account_info(), 
                 MintTo {
                     mint: self.liquidity_mint.to_account_info(),
-                    to: self.user_liquidity_token.to_account_info(),
+                    to: self.user_liquidity_mint_token.to_account_info(),
                     authority: self.lending_market_authority.to_account_info(),
                 },
                 signers
@@ -92,7 +86,7 @@ pub fn handler<'info>(ctx: Context<DepositLiquidity>, args: DepositLiquidityArgs
     ctx.accounts.reserve.last_update.mark_stale();
 
     // Mint Pool Tokens
-    ctx.accounts.mint_pool_tokens(token_amount, ctx.bumps.lending_market_authority)?;
+    ctx.accounts.mint_pool_tokens(token_amount)?;
 
     Ok(())
 }

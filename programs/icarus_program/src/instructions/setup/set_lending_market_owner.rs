@@ -12,11 +12,11 @@ pub struct SetLendingMarketOwnerArgs {
 pub struct SetLendingMarketOwner<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
-    
     #[account(
         mut,
-        seeds = [LENDING_MARKET_PREFIX, lending_market.vote_account.as_ref()],
-        bump = lending_market.bump_seed,
+        has_one = owner,
+        seeds = [LENDING_MARKET_PREFIX],
+        bump = lending_market.bump,
     )]
     pub lending_market: Account<'info, LendingMarket>,
 }
